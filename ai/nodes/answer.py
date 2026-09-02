@@ -29,7 +29,9 @@ Result ({row_count} row(s)){truncation}:
 {rows}
 
 Rules:
-- Two to four sentences of plain prose. No markdown, no bullet lists, no tables - the rows are already shown beside your answer.
+- Two to four sentences. Use markdown sparingly: **bold** for the figures and names that answer the question, and `backticks` for order IDs and other codes.
+- Use a short bullet list only when there are three or more findings of equal weight. For one or two, write prose.
+- No headings and no tables. The rows are already shown beside your answer, so a table here is the same data twice.
 - Quote the concrete figures that answer the question: the value, the rank, the extreme, the gap.
 - Percentages and rates in the data are already computed. Do not recompute or re-derive anything.
 - If the result is empty, say so plainly and suggest what to ask instead. Do not speculate about what the numbers might have been.
@@ -50,7 +52,7 @@ Rules:
 - Name the method in plain language.
 - If the projection is flat, say why in one clause - a moving average estimates the level and does not project a trend - so a flat line reads as a decision rather than a failure.
 - Close with one sentence on how much confidence twelve months of history supports.
-- Plain prose, four to six sentences. No markdown."""
+- Four to six sentences. Use markdown sparingly: **bold** for the projected range and the recommended quantity, since those are the two numbers the reader acts on. No headings and no tables."""
 
 _DIRECT_PROMPT = """You are a logistics analytics assistant. Answer the user briefly and honestly.
 
@@ -58,14 +60,14 @@ Question: {question}
 
 Context: {reason}
 
-You can answer questions about orders, deliveries, carriers, regions, product categories and warehouses in a dataset covering {window}, and you can forecast demand by category or region. Say what you can do that is relevant to what they asked. Two or three sentences, plain prose, no markdown. Do not invent any figures."""
+You can answer questions about orders, deliveries, carriers, regions, product categories and warehouses in a dataset covering {window}, and you can forecast demand by category or region. Say what you can do that is relevant to what they asked. Two or three sentences, or a short bullet list when you are listing several kinds of question - that is the one place a list reads better than prose. **Bold** sparingly. No headings, no tables. Do not invent any figures."""
 
 _ERROR_PROMPT = """A user's question could not be answered against the data.
 
 Question: {question}
 What went wrong: {error}
 
-Tell them plainly that this one could not be answered, why in one clause, and suggest a close question that would work against a dataset of orders with carrier, region, product category, warehouse, status and delivery dates covering {window}. Three sentences at most, plain prose, no markdown, and do not apologise more than once."""
+Tell them plainly that this one could not be answered, why in one clause, and suggest a close question that would work against a dataset of orders with carrier, region, product category, warehouse, status and delivery dates covering {window}. Three sentences at most. Put the suggested question in **bold** so it is the thing they see; no other markdown, no headings, no tables. Do not apologise more than once."""
 
 
 def _rows_for_prompt(rows: List[Dict[str, Any]]) -> str:
