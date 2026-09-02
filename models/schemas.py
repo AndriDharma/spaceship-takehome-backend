@@ -77,6 +77,30 @@ class RouteDecision(BaseModel):
 # ------------------------------------------------------------
 
 
+class ChartBand(BaseModel):
+    """
+    A shaded range behind one of the lines.
+
+    Only the forecast path sets this. It is a separate object rather than two
+    more entries in yKeys because the bounds are not series in their own right
+    - drawing them as lines would put three strokes on the chart where the
+    honest picture is one line and an uncertainty envelope around it.
+
+    lowKey and highKey name columns present in data but deliberately absent
+    from headers, so they shade the chart without appearing as columns in the
+    data table beside it.
+    """
+
+    lowKey: str
+    highKey: str
+
+    # The series the band belongs to, so the renderer can tint it to match
+    # rather than spending a third colour on it.
+    ofKey: str
+
+    label: str = ""
+
+
 class ChartConfig(BaseModel):
     chartType: ChartType
     title: str
@@ -92,6 +116,10 @@ class ChartConfig(BaseModel):
 
     stacked: bool = False
     insight: str = ""
+
+    # Null on every path but the forecast. A renderer that does not know about
+    # bands still draws a correct chart from the rest of this config.
+    band: Optional[ChartBand] = None
 
 
 class FullChartConfig(ChartConfig):

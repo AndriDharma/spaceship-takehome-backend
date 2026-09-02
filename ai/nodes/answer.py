@@ -44,10 +44,11 @@ Forecast:
 {forecast}
 
 Rules:
-- If there are notes, lead with them. A note explaining that a SKU was too sparse to forecast is the most important thing on the page, and burying it would misrepresent what was computed.
-- State the projected monthly figures and the total over the horizon.
+- If there are notes, lead with them. A note explaining that a SKU was too sparse to forecast, or that a category averages only a few orders a month, is the most important thing on the page - burying it would misrepresent what was computed.
+- State the total over the horizon as a range, not as a single number: "around X units, most likely between Y and Z". The interval is the honest part of this forecast and an answer that quotes only the midpoint throws it away.
 - State the recommended inventory quantity and, in one clause, how safety stock was derived.
 - Name the method in plain language.
+- If the projection is flat, say why in one clause - a moving average estimates the level and does not project a trend - so a flat line reads as a decision rather than a failure.
 - Close with one sentence on how much confidence twelve months of history supports.
 - Plain prose, four to six sentences. No markdown."""
 
