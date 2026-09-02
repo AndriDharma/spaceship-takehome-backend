@@ -1,10 +1,13 @@
 """Environment configuration, read once at import."""
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _int(name: str, default: int) -> int:
@@ -57,6 +60,11 @@ MEMORY_TURNS = _int("MEMORY_TURNS", 3)
 # this too; this set is what lets the validator reject a bad statement with a
 # readable message instead of a privilege error from the driver.
 ALLOWED_TABLES = {"v_orders"}
+
+# Column names, metric semantics and the date anchor, read at startup instead
+# of queried. Absolute by default so it resolves the same from the repo root,
+# from uvicorn's reloader, and from the container's WORKDIR.
+SCHEMA_FILE = os.getenv("SCHEMA_FILE", str(_ROOT / "schema" / "v_orders.yaml"))
 
 # Rows shown to the chart model. It only has to recognise the shape of the
 # result, not read all of it, and the full set is sent to the frontend anyway.

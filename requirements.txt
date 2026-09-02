@@ -2,7 +2,7 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-dotenv==1.2.3
 pydantic==2.13.5
-
+PyYAML==6.0.3
 # Cloud SQL. pg8000 rather than psycopg because the connector ships drivers for
 # pg8000, asyncpg and psycopg2 only - there is no psycopg3 extra.
 SQLAlchemy==2.0.52

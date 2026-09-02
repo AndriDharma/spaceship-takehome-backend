@@ -1,0 +1,381 @@
+tables:
+  v_orders:
+    description: >
+      This table contains order records for shipments handled across multiple carriers, warehouses and regions.
+      It includes identifiers, date keys, categorical labels and numeric values, together with precomputed
+      indicator flags and derived date parts that support straightforward filtering, grouping and rate calculations.
+      Each row represents a single order at the granularity of one order identifier.
+    schema: public
+
+    # --- extension (not in prompt_schema_generator.yaml) -------------------
+    # Nothing is read from the database at startup, so the window the model
+    # resolves relative dates against has to live here. The wall clock is well
+    # past this range; anchoring to it is deliberate.
+    data_window:
+      min_date: "2025-01-01"
+      max_date: "2025-12-30"
+      row_count: 400
+      anchor_date: "2025-12-30"
+      anchor_note: >
+        Treat anchor_date as today. "Last month", "the last 3 months", "recently" and similar
+        phrases resolve against that date, not the current calendar date. State the resolved
+        dates in the answer so the user knows which period was used.
+
+    cardinality:
+      sku: 355
+      client_id: 30
+      origin_city: 9
+      destination_city: 47
+
+    columns:
+      client_id: character varying(50)
+      order_id: character varying(100)
+      order_date: date
+      delivery_date: date
+      carrier: character varying(100)
+      origin_city: character varying(150)
+      destination_city: character varying(150)
+      status: character varying(30)
+      sku: character varying(100)
+      product_category: character varying(100)
+      quantity: integer
+      unit_price_usd: numeric(12,2)
+      order_value_usd: numeric(14,2)
+      is_promo: boolean
+      promo_discount_pct: numeric(5,2)
+      region: character varying(50)
+      warehouse: character varying(100)
+      is_delayed: smallint
+      is_on_time: smallint
+      is_completed: smallint
+      delivery_days: integer
+      order_month: date
+      order_week: date
+      order_year: integer
+      net_value_usd: numeric
+
+    semantics:
+      date_keys: [order_date, delivery_date, order_month, order_week]
+
+      filters:
+        order_id: order_id
+        client_id: client_id
+        sku: sku
+
+      dimensions:
+        time:
+          levels: [{ key: date, column: order_date, label: "Order date" }, { key: week, column: order_week, label: "Order week" }, { key: month, column: order_month, label: "Order month" }, { key: year, column: order_year, label: "Order year" }]
+
+        product:
+          levels: [{ key: sku, column: sku, label: "SKU / product code" }]
+
+        category:
+          levels: [{ key: category, column: product_category, label: "Product category" }]
+
+      # --- extension (not in prompt_schema_generator.yaml) -----------------
+      # Cross-column rules. The generator prompt forbids business semantics
+      # because it documents arbitrary customer tables; this view is ours and
+      # the semantics are known, so withholding them only produces wrong SQL.
+      computation_rules:
+        rate_denominator: >
+          Delay rate and on-time rate must divide by completed orders, not by all orders.
+          Use SUM(is_delayed)::numeric / NULLIF(SUM(is_completed), 0) and
+          SUM(is_on_time)::numeric / NULLIF(SUM(is_completed), 0). A plain AVG(is_delayed)
+          includes canceled, in_transit and exception orders in the denominator, which
+          understates the rate. Multiply by 100 only if the question asks for a percentage.
+        revenue: >
+          order_value_usd is already quantity multiplied by unit_price_usd. Sum it directly.
+          Never multiply it by quantity again and never sum unit_price_usd. Use net_value_usd
+          for revenue after promotional discount and order_value_usd for gross revenue.
+        no_year_in_identifiers: >
+          The digits inside order_id are part of an opaque identifier and are not a date.
+          Always derive time from order_date, order_month, order_week or order_year.
+        boolean_flags: >
+          is_delayed, is_on_time and is_completed are smallint 0/1 and can be averaged or summed
+          directly. is_promo is a real boolean and cannot: PostgreSQL has no AVG(boolean).
+          Use COUNT(*) FILTER (WHERE is_promo) or AVG(CASE WHEN is_promo THEN 1 ELSE 0 END).
+        nullable_delivery: >
+          delivery_date and delivery_days are NULL until an order reaches a final delivery
+          outcome. AVG and COUNT skip those rows automatically, so COUNT(delivery_days)
+          is smaller than COUNT(*). Filter on is_completed = 1 when the distinction matters.
+        exact_literals: >
+          Every categorical column below lists its complete set of values under "values".
+          Match those strings exactly. A near-miss returns zero rows rather than an error,
+          which reads as a valid but empty answer.
+
+      features:
+        client_id:
+          column: client_id
+          type: id_like
+          description: "Identifier code for the client that placed the order."
+          examples: [CL-1029, CL-1008, CL-1003]
+          synonyms: [client, customer, customer id, account]
+          metric_semantics: >
+            30 distinct clients across the data. Suitable for grouping and for exact-match filtering.
+
+        order_id:
+          column: order_id
+          type: id_like
+          description: "Unique identifier code for a single order."
+          examples: [ORD-2026-269595-0071, ORD-2026-641029-0327, ORD-2026-655170-0358]
+          synonyms: [order, order number, order reference, order code]
+          metric_semantics: >
+            Opaque identifier. The four digits following the ORD- prefix are part of the code
+            and are not the order year - every row in this data was ordered in 2025.
+            Never parse a date out of this column.
+
+        order_date:
+          column: order_date
+          type: date
+          description: "Date values recording when the order was placed."
+          examples: ["2025-01-01", "2025-01-02", "2025-01-03"]
+          synonyms: [ordered on, order placed, purchase date, date]
+          metric_semantics: >
+            The primary date key and the column the data window is measured on.
+            All relative time expressions resolve against data_window.anchor_date.
+
+        delivery_date:
+          column: delivery_date
+          type: date
+          description: "Date values recording when the order was delivered; empty when not yet delivered."
+          examples: ["2025-01-07", "2025-01-02", "2025-01-04"]
+          synonyms: [delivered on, arrival date, receipt date]
+          metric_semantics: >
+            NULL for orders with status in_transit, canceled or exception. Do not use it to
+            count orders; use order_date for volume and this column only for delivery timing.
+
+        carrier:
+          column: carrier
+          type: categorical
+          description: "Text labels naming the shipping carrier that handled the order."
+          examples: [GLS, UPS, DHL]
+          synonyms: [shipper, courier, delivery company, carrier name]
+          values: [DHL, DPD, FedEx, GLS, LaserShip, "Royal Mail", UPS, USPS, OnTrac]
+          metric_semantics: >
+            Nine carriers, complete list above. Note the exact casing: FedEx, LaserShip and
+            OnTrac are mixed case, and "Royal Mail" contains a space. Values are short names,
+            not full legal names - "DHL", never "DHL Express".
+
+        origin_city:
+          column: origin_city
+          type: categorical
+          description: "Text labels naming the city an order was dispatched from, formatted as city followed by a region or country code."
+          examples: ["Amsterdam, NL", "Newark, NJ", "Berlin, DE"]
+          synonyms: [source city, dispatch city, ship from, departure city]
+          values: ["Amsterdam, NL", "Atlanta, GA", "Berlin, DE", "Chicago, IL", "Dallas, TX", "London, UK", "Los Angeles, CA", "Newark, NJ", "San Francisco, CA"]
+          metric_semantics: >
+            Nine origins, one per warehouse. The comma and the trailing code are part of the
+            stored value - "Amsterdam, NL", never "Amsterdam".
+
+        destination_city:
+          column: destination_city
+          type: categorical
+          description: "Text labels naming the city an order was shipped to, formatted as city followed by a region or country code."
+          examples: ["Brussels, BE", "Washington, DC", "Munich, DE"]
+          synonyms: [target city, delivery city, ship to, arrival city]
+          values: ["Austin, TX", "Baltimore, MD", "Birmingham, UK", "Boise, ID", "Boston, MA", "Brussels, BE", "Charlotte, NC", "Cleveland, OH", "Cologne, DE", "Denver, CO", "Detroit, MI", "Edinburgh, UK", "Frankfurt, DE", "Glasgow, UK", "Hamburg, DE", "Houston, TX", "Indianapolis, IN", "Kansas City, MO", "Las Vegas, NV", "Leeds, UK", "Manchester, UK", "Milwaukee, WI", "Minneapolis, MN", "Munich, DE", "Nashville, TN", "New York, NY", "Oklahoma City, OK", "Orlando, FL", "Paris, FR", "Philadelphia, PA", "Phoenix, AZ", "Portland, OR", "Prague, CZ", "Reno, NV", "Richmond, VA", "Sacramento, CA", "Salt Lake City, UT", "San Antonio, TX", "San Diego, CA", "San Jose, CA", "Seattle, WA", "St. Louis, MO", "Tampa, FL", "Vienna, AT", "Warsaw, PL", "Washington, DC", "Zurich, CH"]
+          metric_semantics: >
+            47 destinations, complete list above. Same format as origin_city. Note
+            "St. Louis, MO" keeps the period and "Washington, DC" uses DC as the code.
+            With 400 orders spread over 47 cities, per-city aggregates rest on very few rows.
+
+        status:
+          column: status
+          type: categorical
+          description: "Text labels recording the current state of an order."
+          examples: [delayed, delivered, in_transit]
+          synonyms: [state, order status, delivery status, outcome]
+          values: [canceled, delayed, delivered, exception, in_transit]
+          metric_semantics: >
+            Lowercase with an underscore separator - "in_transit", never "In Transit".
+            delivered and delayed are final outcomes; canceled, in_transit and exception are not.
+            Prefer the precomputed is_delayed, is_on_time and is_completed flags over
+            comparing this column directly when computing rates.
+
+        sku:
+          column: sku
+          type: id_like
+          description: "Identifier code for the product ordered, prefixed with a category token."
+          examples: [PAPER-0001, BRUSH-0212, STICKER-0210]
+          synonyms: [product code, item code, article number, product id]
+          metric_semantics: >
+            355 distinct SKUs across 400 orders - roughly one order per SKU. Per-SKU aggregates
+            and per-SKU forecasts are not statistically meaningful; aggregate by
+            product_category or region instead and say so if the user asked for a SKU.
+
+        product_category:
+          column: product_category
+          type: categorical
+          description: "Text labels grouping products into categories."
+          examples: [PAPER, BRUSH, STICKER]
+          synonyms: [category, product type, product group, item category]
+          values: [BOOK, BRUSH, CRAYON, MARKER, PAINT, PAPER, PENCIL, STICKER]
+          metric_semantics: >
+            Eight categories, stored in upper case - "PAPER", never "Paper" or "paper".
+            Matches the prefix of the sku code. This is the reliable grouping level for
+            product analysis and for demand forecasting.
+
+        quantity:
+          column: quantity
+          type: numeric
+          description: "Integer values recording the number of units on an order."
+          examples: [6, 2, 1]
+          synonyms: [qty, units, count, volume]
+          metric_semantics: >
+            Units ordered. Sum it for unit volume. It is already reflected in
+            order_value_usd, so do not use it to scale any monetary column.
+
+        unit_price_usd:
+          column: unit_price_usd
+          type: numeric
+          description: "Decimal values recording the price of a single unit in US dollars."
+          examples: [5.53, 13.54, 6.24]
+          synonyms: [unit price, price per unit, item price]
+          metric_semantics: >
+            Per-unit price. Never sum this column - summing prices across orders is meaningless.
+            Average it only when the question is explicitly about price level.
+
+        order_value_usd:
+          column: order_value_usd
+          type: numeric
+          description: "Decimal values recording the total monetary value of an order in US dollars."
+          examples: [33.18, 27.08, 12.48]
+          synonyms: [order value, gross value, revenue, order amount, sales]
+          metric_semantics: >
+            Already equal to quantity multiplied by unit_price_usd. This is the gross revenue
+            column - SUM it directly for total revenue. Multiplying it by quantity double counts.
+
+        is_promo:
+          column: is_promo
+          type: categorical
+          description: "Boolean values indicating whether an order was placed under a promotion."
+          examples: [false]
+          synonyms: [promo, promotional, on promotion, discounted]
+          values: [true, false]
+          metric_semantics: >
+            A real boolean, unlike the smallint 0/1 flags. PostgreSQL rejects AVG(is_promo);
+            use COUNT(*) FILTER (WHERE is_promo) or AVG(CASE WHEN is_promo THEN 1 ELSE 0 END).
+            Filter with "WHERE is_promo" rather than "WHERE is_promo = 1".
+
+        promo_discount_pct:
+          column: promo_discount_pct
+          type: numeric
+          description: "Decimal values recording the promotional discount applied to an order, expressed as a percentage."
+          examples: ["0.00"]
+          synonyms: [discount, discount percent, promo discount, markdown]
+          metric_semantics: >
+            Stored as a percentage number, not a fraction - 15.00 means 15 percent.
+            Zero when is_promo is false. Already applied in net_value_usd, so do not
+            apply it a second time.
+
+        region:
+          column: region
+          type: categorical
+          description: "Text labels grouping orders into geographic regions."
+          examples: [EU, "US-E", "US-W"]
+          synonyms: [area, territory, geography, market]
+          values: [EU, UK, "US-C", "US-E", "US-W"]
+          metric_semantics: >
+            Five regions, complete list above. The US is split three ways by hyphenated
+            code - "US-E", "US-C", "US-W" - and there is no plain "US" value. UK is
+            separate from EU. Match these codes exactly.
+
+        warehouse:
+          column: warehouse
+          type: categorical
+          description: "Text labels identifying the fulfilment site an order was shipped from."
+          examples: ["AMS-FC1", "EWR-DC1", "BER-FC1"]
+          synonyms: [facility, fulfilment center, distribution center, site, hub]
+          values: ["AMS-FC1", "ATL-DC1", "BER-FC1", "CHI-DC1", "DFW-DC1", "EWR-DC1", "LAX-DC1", "LON-FC1", "SFO-DC2"]
+          metric_semantics: >
+            Nine sites, an airport code plus a facility suffix. Maps one-to-one onto
+            origin_city, so grouping by either produces the same partitioning - pick
+            whichever the question names.
+
+        is_delayed:
+          column: is_delayed
+          type: numeric
+          description: "Integer flag values indicating whether an order was recorded as delayed."
+          examples: [1, 0]
+          synonyms: [delayed, late, delay flag, is late]
+          metric_semantics: >
+            1 when status = 'delayed', otherwise 0. For a delay COUNT, SUM this column.
+            For a delay RATE, divide by completed orders, not by all rows:
+            SUM(is_delayed)::numeric / NULLIF(SUM(is_completed), 0). A bare AVG(is_delayed)
+            counts canceled and in_transit orders as on time and understates the rate.
+
+        is_on_time:
+          column: is_on_time
+          type: numeric
+          description: "Integer flag values indicating whether an order was recorded as delivered on time."
+          examples: [0, 1]
+          synonyms: [on time, punctual, on time flag, met schedule]
+          metric_semantics: >
+            1 when status = 'delivered', otherwise 0 - so it is 0 for in_transit orders that
+            may still arrive on time. For an on-time RATE use
+            SUM(is_on_time)::numeric / NULLIF(SUM(is_completed), 0).
+            is_on_time and is_delayed are complements only within completed orders.
+
+        is_completed:
+          column: is_completed
+          type: numeric
+          description: "Integer flag values indicating whether an order reached a final delivery outcome."
+          examples: [1, 0]
+          synonyms: [completed, finished, resolved, final outcome]
+          metric_semantics: >
+            1 when status is 'delivered' or 'delayed', otherwise 0. This is the correct
+            denominator for every delivery-performance rate. Orders that are canceled,
+            in_transit or exception have no delivery outcome and must not sit in that denominator.
+
+        delivery_days:
+          column: delivery_days
+          type: numeric
+          description: "Integer values recording the number of days between the order date and the delivery date."
+          examples: [6, 1, 3]
+          synonyms: [transit time, lead time, days to deliver, delivery time]
+          metric_semantics: >
+            delivery_date minus order_date, NULL when delivery_date is NULL. AVG skips those
+            rows automatically, so AVG(delivery_days) is already an average over delivered
+            orders only. The data carries no promised delivery date, so there is no SLA
+            threshold - "late" means status = 'delayed' and nothing else.
+
+        order_month:
+          column: order_month
+          type: date
+          description: "Date values marking the first day of the month in which the order was placed."
+          examples: ["2025-01-01"]
+          synonyms: [month, monthly period, order month, period]
+          metric_semantics: >
+            Precomputed month bucket. Group and order by this column for monthly trends
+            rather than re-deriving it with date_trunc.
+
+        order_week:
+          column: order_week
+          type: date
+          description: "Date values marking the first day of the week in which the order was placed."
+          examples: ["2024-12-30"]
+          synonyms: [week, weekly period, order week, week start]
+          metric_semantics: >
+            ISO week start, a Monday. For orders early in January this falls in the previous
+            calendar year, which is expected and not a data error.
+
+        order_year:
+          column: order_year
+          type: date
+          description: "Integer values recording the calendar year in which the order was placed."
+          examples: [2025]
+          synonyms: [year, order year, calendar year]
+          metric_semantics: >
+            Every row in the current data is 2025, so filtering on a year other than 2025
+            returns nothing. Grouping by it is only useful once the data spans more years.
+
+        net_value_usd:
+          column: net_value_usd
+          type: numeric
+          description: "Decimal values recording the monetary value of an order after discount, in US dollars."
+          examples: [33.18, 27.08, 12.48]
+          synonyms: [net value, net revenue, value after discount, net sales]
+          metric_semantics: >
+            order_value_usd with promo_discount_pct applied and rounded to two decimals.
+            Equal to order_value_usd when there is no promotion. Use this for revenue net of
+            discounts and order_value_usd for gross; state which one the answer reports.

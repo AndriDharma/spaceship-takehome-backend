@@ -1,81 +1,177 @@
-"""What the model is told about the data, loaded once at startup.
+"""What the model is told about the data, read from a file at startup.
 
-Three things are read from the live database rather than hard-coded:
+This used to run seven queries against the live database on every process
+start. It now reads schema/v_orders.yaml instead, for two reasons:
 
-  * the column list, which becomes the validator's whitelist as well as the
-    schema block in the prompt;
-  * the column comments, which is where the metric semantics live - see
-    db/01_v_orders.sql. Keeping them in the catalog means the rules cannot
-    drift from the view that implements them;
-  * the data window and the distinct values of the low-cardinality columns.
+  * Cloud Run runs this with min-instances=0, so every cold start paid a Cloud
+    SQL connect plus seven round-trips before the first token. The file removes
+    the database from the boot path entirely.
+  * The metric semantics - that a delay rate divides by completed orders, that
+    order_value_usd is already extended - are prompt content. Keeping them in a
+    version-controlled file means a change to what the model is told shows up
+    in a diff, instead of living invisibly inside a COMMENT ON COLUMN.
 
-The last one matters more than it looks. Without it the model guesses at
-literals - 'DHL Express' for a carrier stored as 'DHL', 'Delivered' for
-'delivered' - and returns an empty result that looks like a correct answer.
+The trade is that the file is now authoritative for the validator's column
+whitelist, so it has to be regenerated whenever the view changes. _validate()
+below is what makes that failure loud rather than silent.
 """
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core import db
+import yaml
 
-# Columns whose values are worth listing in full. All are small enough that
-# the entire domain fits in a few tokens.
-_ENUM_COLUMNS = [
-    "status",
-    "carrier",
-    "region",
-    "product_category",
-    "warehouse",
-]
+from core import config
 
-_COLUMN_SQL = """
-SELECT a.attname                                  AS name,
-       format_type(a.atttypid, a.atttypmod)       AS data_type,
-       col_description(a.attrelid, a.attnum)      AS comment
-FROM   pg_attribute a
-WHERE  a.attrelid = 'v_orders'::regclass
-  AND  a.attnum > 0
-  AND  NOT a.attisdropped
-ORDER  BY a.attnum
-"""
 
-_WINDOW_SQL = """
-SELECT MIN(order_date) AS min_date,
-       MAX(order_date) AS max_date,
-       COUNT(*)        AS row_count
-FROM   v_orders
-"""
+class SchemaFileError(RuntimeError):
+    """The schema file is missing, malformed, or internally inconsistent."""
 
+
+# Columns whose complete value domain is listed in the prompt. Anything with a
+# "values" key in the file qualifies; the file decides, not this module.
 _cache: Optional[Dict[str, Any]] = None
 
 
+def _collapse(text: Any) -> str:
+    """YAML folded scalars keep their line breaks. The prompt does not want them."""
+    return " ".join(str(text or "").split())
+
+
+def _validate(table: str, body: Dict[str, Any], path: Path) -> None:
+    """
+    Reject a file that cannot safely drive the validator.
+
+    The check that matters is the last one. Every other failure here is a typo
+    that shows up immediately; a `columns` block that has drifted out of step
+    with `features` produces a whitelist that silently disagrees with the view,
+    and the symptom would be arbitrary queries being rejected days later.
+    """
+    if table not in config.ALLOWED_TABLES:
+        raise SchemaFileError(
+            f"{path} documents table {table!r}, which is not in "
+            f"ALLOWED_TABLES ({sorted(config.ALLOWED_TABLES)}). "
+            "Generated SQL against it would be rejected by the validator."
+        )
+
+    columns = body.get("columns")
+
+    if not isinstance(columns, dict) or not columns:
+        raise SchemaFileError(f"{path}: tables.{table}.columns is missing or empty.")
+
+    window = body.get("data_window")
+
+    if not isinstance(window, dict):
+        raise SchemaFileError(f"{path}: tables.{table}.data_window is missing.")
+
+    missing = [
+        key
+        for key in ("min_date", "max_date", "row_count", "anchor_date")
+        if window.get(key) in (None, "")
+    ]
+
+    if missing:
+        raise SchemaFileError(
+            f"{path}: data_window is missing {', '.join(missing)}. "
+            "anchor_date is what relative dates resolve against - without it "
+            "the assistant would answer 'last month' against the wall clock."
+        )
+
+    features = (body.get("semantics") or {}).get("features") or {}
+
+    undocumented = sorted(set(columns) - set(features))
+    orphaned = sorted(set(features) - set(columns))
+
+    if undocumented or orphaned:
+        parts = []
+
+        if undocumented:
+            parts.append(f"columns with no feature entry: {', '.join(undocumented)}")
+
+        if orphaned:
+            parts.append(f"features with no column: {', '.join(orphaned)}")
+
+        raise SchemaFileError(
+            f"{path} is internally inconsistent - {'; '.join(parts)}. "
+            "Regenerate it against the current view."
+        )
+
+
 async def load() -> Dict[str, Any]:
-    """Read the schema once. Called from the application lifespan."""
+    """
+    Read the schema file once. Called from the application lifespan.
+
+    Async only so main.py's call site did not have to change. The read is a
+    single small file on local disk before the server accepts traffic, so
+    pushing it to a thread would buy nothing.
+    """
     global _cache
 
     if _cache is not None:
         return _cache
 
-    columns = await db.query(_COLUMN_SQL)
-    window = (await db.query(_WINDOW_SQL))[0]
+    path = Path(config.SCHEMA_FILE)
 
+    if not path.is_file():
+        raise SchemaFileError(f"Schema file not found at {path}.")
+
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    tables = (document or {}).get("tables")
+
+    if not isinstance(tables, dict) or len(tables) != 1:
+        raise SchemaFileError(
+            f"{path}: expected exactly one table under 'tables', "
+            f"found {len(tables) if isinstance(tables, dict) else 0}."
+        )
+
+    table, body = next(iter(tables.items()))
+
+    _validate(table, body, path)
+
+    declared: Dict[str, str] = body["columns"]
+    features: Dict[str, Any] = body["semantics"]["features"]
+    window: Dict[str, Any] = body["data_window"]
+
+    columns: List[Dict[str, Any]] = []
     enums: Dict[str, List[str]] = {}
 
-    for column in _ENUM_COLUMNS:
-        # The column name is from the fixed list above, never from user input.
-        rows = await db.query(
-            f"SELECT DISTINCT {column} AS value FROM v_orders "
-            f"WHERE {column} IS NOT NULL ORDER BY 1"
+    # Declaration order is the file's order, which is the view's order. Python
+    # dicts preserve it and so does yaml.safe_load, so the prompt reads
+    # top-to-bottom like the DDL does.
+    for name, data_type in declared.items():
+        feature = features.get(name) or {}
+        values = feature.get("values")
+
+        columns.append(
+            {
+                "name": name,
+                "data_type": data_type,
+                "description": _collapse(feature.get("description")),
+                "metric_semantics": _collapse(feature.get("metric_semantics")),
+                "values": values,
+            }
         )
-        enums[column] = [row["value"] for row in rows]
+
+        if values:
+            enums[name] = list(values)
 
     _cache = {
+        "table": table,
+        "schema": body.get("schema", "public"),
+        "description": _collapse(body.get("description")),
         "columns": columns,
-        "column_names": {column["name"] for column in columns},
+        "column_names": set(declared),
         "min_date": window["min_date"],
         "max_date": window["max_date"],
         "row_count": window["row_count"],
+        "anchor": window["anchor_date"],
+        "anchor_note": _collapse(window.get("anchor_note")),
         "enums": enums,
+        "rules": [
+            _collapse(rule)
+            for rule in (body["semantics"].get("computation_rules") or {}).values()
+        ],
     }
 
     return _cache
@@ -97,39 +193,57 @@ def anchor_date() -> str:
     exactly the questions the assignment gives as examples. The latest
     order_date is what "now" means for this data, and the answer says so.
     """
-    return cached()["max_date"]
+    return cached()["anchor"]
 
 
 def schema_block() -> str:
-    """The schema as the router prompt sees it."""
+    """
+    The schema as the router prompt sees it.
+
+    Deliberately narrower than the file. The file also carries synonyms,
+    dimensions and filters, which exist so a retrieval layer can pick a table
+    out of many - there is one table here and all of its columns go into every
+    prompt, so that metadata would cost tokens per turn and change nothing.
+    """
     meta = cached()
 
     lines = [
-        "Table: v_orders",
+        f"Table: {meta['schema']}.{meta['table']}",
         "(the only table you may query - it already contains every metric you need)",
         "",
+        meta["description"],
+        "",
+        f"Data window: {meta['min_date']} to {meta['max_date']} "
+        f"({meta['row_count']} orders).",
+        meta["anchor_note"],
+        "",
+        "Columns:",
     ]
 
     for column in meta["columns"]:
-        comment = column["comment"] or ""
-        suffix = f"  -- {comment}" if comment else ""
-        lines.append(f"  {column['name']} {column['data_type']}{suffix}")
+        lines.append(f"  {column['name']}  {column['data_type']}")
 
-    lines.append("")
-    lines.append("Exact values for the categorical columns:")
+        detail = " ".join(
+            part
+            for part in (column["description"], column["metric_semantics"])
+            if part
+        )
 
-    for name, values in meta["enums"].items():
-        lines.append(f"  {name}: {', '.join(str(value) for value in values)}")
+        if detail:
+            lines.append(f"    {detail}")
 
-    lines.append("")
-    lines.append(
-        f"Data window: {meta['min_date']} to {meta['max_date']} "
-        f"({meta['row_count']} orders)."
-    )
-    lines.append(
-        f"Treat {meta['max_date']} as today. "
-        "\"Last month\", \"the last 3 months\" and similar phrases are relative "
-        "to that date, not to the current calendar date."
-    )
+        # The complete domain, not a sample. A near-miss on a literal returns
+        # zero rows rather than an error, which reads to the user as a valid
+        # answer of "none" - listing every value is what makes that impossible.
+        if column["values"]:
+            rendered = ", ".join(str(value) for value in column["values"])
+            lines.append(f"    Values: {rendered}")
+
+    if meta["rules"]:
+        lines.append("")
+        lines.append("Rules for computing metrics from these columns:")
+
+        for rule in meta["rules"]:
+            lines.append(f"  - {rule}")
 
     return "\n".join(lines)
