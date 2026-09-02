@@ -1,0 +1,22 @@
+.env
+*.env
+!.env.example
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Never bake a service account into an image. Cloud Run uses the attached
+# service account; the file is a local-development convenience only.
+service_account/
+*.json.key
+*-sa.json
+
+README.md
+db/

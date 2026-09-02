@@ -1,0 +1,21 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-dotenv==1.2.3
+pydantic==2.13.5
+
+# Cloud SQL. pg8000 rather than psycopg because the connector ships drivers for
+# pg8000, asyncpg and psycopg2 only - there is no psycopg3 extra.
+SQLAlchemy==2.0.52
+cloud-sql-python-connector[pg8000]==1.22.0
+pg8000==1.31.5
+
+# Deterministic SQL validation. Nothing generated reaches the database without
+# passing through this.
+sqlglot==30.17.0
+
+# AI layer. Vertex only; no other provider is configured.
+
+langchain==1.3.14
+langgraph==1.2.9
+langchain-core==1.5.1
+langchain-google-vertexai==3.2.4

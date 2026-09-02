@@ -1,0 +1,19 @@
+.env
+*.env
+!.env.example
+
+# Service account keys. The deployed service uses the attached Cloud Run
+# service account; this file only exists for local development.
+service_account/
+*-sa.json
+*.json.key
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+.vscode/
+.idea/
+.DS_Store
