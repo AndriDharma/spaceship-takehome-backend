@@ -13,6 +13,7 @@ from ai import streaming
 from ai.llm import get_llm
 from ai.state import GraphState
 from core import db
+from core.messages import text_of
 from services import schema_service, sql_validator
 
 MAX_RETRIES = 1
@@ -100,7 +101,7 @@ async def retry_sql_node(state: GraphState) -> Dict[str, Any]:
 
     try:
         response = await get_llm().ainvoke(prompt)
-        repaired = sql_validator.clean(response.content)
+        repaired = sql_validator.clean(text_of(response))
 
     except Exception as exc:
         print(f"SQL REPAIR FAILED | {type(exc).__name__}: {exc}")

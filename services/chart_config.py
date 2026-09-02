@@ -12,6 +12,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from core import config
+from core.messages import text_of
 from core.serialize import column_kind
 from models.schemas import FullChartConfig
 
@@ -252,7 +253,7 @@ async def build(
             ]
         )
 
-        chosen = _coerce(_parse_json(response.content), rows, headers)
+        chosen = _coerce(_parse_json(text_of(response)), rows, headers)
 
     except Exception as exc:
         print(f"CHART CONFIG REJECTED | {type(exc).__name__}: {exc}")

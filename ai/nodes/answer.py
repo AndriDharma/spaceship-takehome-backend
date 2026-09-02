@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 from ai import streaming
 from ai.llm import get_llm
 from ai.state import GraphState
+from core.messages import text_of
 
 # The model has to recognise the shape of the result and read the notable
 # values out of it, not recite all of it. The full set goes to the frontend.
@@ -136,7 +137,11 @@ async def answer_node(state: GraphState) -> Dict[str, Any]:
 
     try:
         async for chunk in get_llm(temperature=0.0).astream(prompt):
-            text = getattr(chunk, "content", "") or ""
+            # A streamed chunk carries the same block structure as a complete
+            # message, so it needs the same flattening - and the same dropping
+            # of reasoning blocks, which would otherwise stream the model's
+            # working straight into the answer panel.
+            text = text_of(chunk)
 
             if text:
                 collected.append(text)

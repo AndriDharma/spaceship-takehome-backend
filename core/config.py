@@ -19,11 +19,14 @@ def _int(name: str, default: int) -> int:
 # ------------------------------------------------------------
 
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
-VERTEX_REGION = os.getenv("VERTEX_REGION", "us-central1")
 
-# Deliberately the only place a model id appears. Google versions Gemini as
-# 1.5 / 2.0 / 2.5 / 3, so if this value 404s at Vertex the fix is one line in
-# .env rather than a code change.
+# Defaults to global because that is where gemini-3.7-flash is served, and it
+# is the only place it is served. A regional endpoint returns 404 for this
+# model regardless of project permissions.
+VERTEX_REGION = os.getenv("VERTEX_REGION", "global")
+
+# Deliberately the only place a model id appears, so switching models is an
+# environment change rather than a code change.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 
 # Local only. Unset on Cloud Run, where the attached service account supplies

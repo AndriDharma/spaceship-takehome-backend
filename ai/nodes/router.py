@@ -20,6 +20,7 @@ from typing import Any, Dict
 from ai import streaming
 from ai.llm import get_llm
 from ai.state import GraphState
+from core.messages import text_of
 from models.schemas import RouteDecision
 
 _PROMPT = """You are the router for a logistics analytics assistant. Decide which tool answers the user's question, and return ONLY a JSON object - no markdown, no prose.
@@ -115,7 +116,7 @@ async def route_node(state: GraphState) -> Dict[str, Any]:
 
     try:
         response = await get_llm().ainvoke(prompt)
-        decision = RouteDecision(**_parse(response.content))
+        decision = RouteDecision(**_parse(text_of(response)))
 
     except Exception as exc:
         print(f"ROUTER FAILED | {type(exc).__name__}: {exc}")
