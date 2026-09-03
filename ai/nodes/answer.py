@@ -1,4 +1,15 @@
-"""Turning a computed result into a sentence.
+"""Turning a computed result into a written answer.
+
+How long that answer is follows from the result rather than from a fixed
+budget. A single figure gets two sentences; a result with several dimensions
+gets a titled, sectioned note with the findings in bullets. The prompt states
+those tiers explicitly, because a model given room to write and no rule about
+when to use it will pad a one-number answer into a report.
+
+The counterpart to that freedom is the instruction to characterise rather than
+recite. The full table is already rendered beside the answer, so prose that
+walks the rows one at a time is the same data twice - and the longer the answer
+is allowed to be, the more inviting that failure becomes.
 
 The one rule this node exists to enforce: it is given the rows and nothing
 else. It has no database access, no tools, and no conversation history - the
@@ -28,15 +39,23 @@ Question: {question}
 Result ({row_count} row(s)){truncation}:
 {rows}
 
-Rules:
-- Two to four sentences. Use markdown sparingly: **bold** for the figures and names that answer the question, and `backticks` for order IDs and other codes.
-- Use a short bullet list only when there are three or more findings of equal weight. For one or two, write prose.
-- No headings and no tables. The rows are already shown beside your answer, so a table here is the same data twice.
-- Quote the concrete figures that answer the question: the value, the rank, the extreme, the gap.
-- Percentages and rates in the data are already computed. Do not recompute or re-derive anything.
-- If the result is empty, say so plainly and suggest what to ask instead. Do not speculate about what the numbers might have been.
-- The data covers {window}. If the question referred to a relative period, say which dates that resolved to.
-- Do not mention SQL, queries, tables or columns. The user asked a business question."""
+Match the depth of your answer to the shape of the result:
+
+- A single value, or a single row: two or three sentences, with the figure in **bold**. No headings and no bullets - there is one finding, and a section header over one number is a shape imposed on data that does not have it.
+- One dimension (one grouping column and one measure): open with a **bold title line** naming what is shown and the period it covers, then a sentence introducing it, then two to four bullets. Each bullet leads with its **bold** figure.
+- Two or more dimensions, or two or more measures: the same opening, then one `### Section` per dimension or measure. Under each, a sentence describing what that part of the data does, then two or three bullets leading with **bold** figures.
+
+Writing it:
+- Characterise the data, do not recite it. The highest and the lowest, the gap between them, the range, where a trend turns, which groups sit together, which one is the outlier. Never walk the rows one at a time - the full table is already on screen beside you, and repeating it in prose is the one thing that makes a long answer worse than a short one.
+- Percentages, rates and averages in the result are already computed. Report them as they are; never recompute or re-derive.
+- Use `backticks` for order IDs, SKUs, warehouse codes and similar identifiers.
+- No tables. `###` is the only heading level you may use - never `#` or `##`.
+- Do not use citation markers of any kind.
+- The data covers {window}. When the question used a relative period like "last month", name the dates it resolved to in the title.
+- If the result is empty, say so plainly in a sentence or two and suggest what to ask instead. Do not speculate about what the numbers might have been.
+- Do not mention SQL, queries, tables or columns. The user asked a business question.
+
+Tone: a helpful analyst talking to a colleague. Warm and direct. Open by telling them what you are showing, and close with a sentence on what the pattern might reflect when the data supports one - seasonality, a procurement cycle, a carrier that behaves differently from the rest. Skip the empty parts of politeness: no "great question", no "I hope this helps", no offers of further assistance."""
 
 _FORECAST_PROMPT = """Present this demand forecast to the user.
 
@@ -45,14 +64,19 @@ Question: {question}
 Forecast:
 {forecast}
 
-Rules:
-- If there are notes, lead with them. A note explaining that a SKU was too sparse to forecast, or that a category averages only a few orders a month, is the most important thing on the page - burying it would misrepresent what was computed.
-- State the total over the horizon as a range, not as a single number: "around X units, most likely between Y and Z". The interval is the honest part of this forecast and an answer that quotes only the midpoint throws it away.
-- State the recommended inventory quantity and, in one clause, how safety stock was derived.
-- Name the method in plain language.
-- If the projection is flat, say why in one clause - a moving average estimates the level and does not project a trend - so a flat line reads as a decision rather than a failure.
-- Close with one sentence on how much confidence twelve months of history supports.
-- Four to six sentences. Use markdown sparingly: **bold** for the projected range and the recommended quantity, since those are the two numbers the reader acts on. No headings and no tables."""
+Structure:
+- Open with a **bold title line** naming what is being forecast and over what horizon, then a sentence introducing it.
+- If there are notes, they come immediately after that sentence and before anything else. A note explaining that a SKU was too sparse to forecast, or that a category averages only a few orders a month, is the most important thing on the page - burying it below the numbers would misrepresent what was actually computed.
+- `### Projection` - the monthly figures, and the total over the horizon stated as a range rather than a single number: "around X units, most likely between Y and Z". The interval is the honest part of this forecast, and an answer that quotes only the midpoint throws it away. **Bold** the range.
+- `### Inventory Recommendation` - the recommended quantity in **bold**, and in one clause how safety stock was derived.
+- `### Method and Confidence` - the method in plain language, and how much confidence twelve months of history supports. If the projection is flat, say why here: a moving average estimates the level and does not project a trend, so a flat line is a decision rather than a failure.
+
+Writing it:
+- No tables. `###` is the only heading level you may use - never `#` or `##`.
+- Do not use citation markers of any kind.
+- Every figure you state must come from the forecast above. Do not compute your own interval, total or recommendation.
+
+Tone: a helpful analyst talking to a colleague. Warm and direct, and plain about what the numbers can and cannot support. Skip the empty parts of politeness: no "great question", no "I hope this helps", no offers of further assistance."""
 
 _DIRECT_PROMPT = """You are a logistics analytics assistant. Answer the user briefly and honestly.
 
@@ -139,7 +163,13 @@ async def answer_node(state: GraphState) -> Dict[str, Any]:
     collected: List[str] = []
 
     try:
-        async for chunk in get_llm(temperature=0.0).astream(prompt):
+        # A larger output budget than the other calls. A sectioned answer over
+        # a multi-dimension result runs several hundred tokens, and on a
+        # thinking model the reasoning is drawn from the same budget - so the
+        # default 2048 is close enough to the ceiling to risk truncating an
+        # answer mid-section. It is a cap, not a reservation; short answers
+        # cost the same as before.
+        async for chunk in get_llm(temperature=0.0, max_tokens=4096).astream(prompt):
             # A streamed chunk carries the same block structure as a complete
             # message, so it needs the same flattening - and the same dropping
             # of reasoning blocks, which would otherwise stream the model's
