@@ -97,7 +97,7 @@ application and `deploy.sh`.
 | `REGION` | Cloud Run and Artifact Registry region (default `asia-southeast2`). Independent of `VERTEX_REGION` |
 | `REPOSITORY`, `IMAGE_NAME`, `SERVICE_NAME` | Artifact Registry and Cloud Run names |
 | `SERVICE_ACCOUNT` | Runtime service account email |
-| `MIN_INSTANCES` | Default `1` — see [deployment](#10-deployment) |
+| `MIN_INSTANCES` | Script default `1`, but set to `0` in the current `.env` to avoid paying for an idle instance during development. **Set to `1` before review** — see [deployment](#10-deployment) |
 | `MAX_INSTANCES` | Default `10` |
 
 ### 1.4 Run locally
@@ -256,12 +256,12 @@ rendering data — is deterministic Python and SQL.
 
 ### 4.1 Inventory
 
-| # | Call site | Runs when | Input | Output | Temp | On failure |
+| # | Call site | Runs when | Input | Output | Temp / max tokens | On failure |
 |---|---|---|---|---|---|---|
-| **1** | `ai/nodes/router.py` → `route_node` | **Every** chat turn | Schema block + last 3 turns + question | JSON `RouteDecision` | 0 | Degrades to `direct` mode |
-| **2** | `ai/nodes/sql.py` → `retry_sql_node` | Only when validation failed, **max once** | Rejected SQL + rejection reason + schema + question | Raw `SELECT` text | 0 | Empty SQL → give up → answer explains |
-| **3** | `ai/nodes/answer.py` → `answer_node` | **Every** chat turn | One of four prompts, by mode | Streamed prose | 0 | Static fallback sentence |
-| **4** | `services/chart_config.py` → `build` | Only when the result passed the chartability gate | Column names + first 30 rows + question | JSON `ChartConfig` | 0 | Deterministic fallback chart |
+| **1** | `ai/nodes/router.py` → `route_node` | **Every** chat turn | Schema block + last 3 turns + question | JSON `RouteDecision` | 0 / 2048 | Degrades to `direct` mode |
+| **2** | `ai/nodes/sql.py` → `retry_sql_node` | Only when validation failed, **max once** | Rejected SQL + rejection reason + schema + question | Raw `SELECT` text | 0 / 2048 | Empty SQL → give up → answer explains |
+| **3** | `ai/nodes/answer.py` → `answer_node` | **Every** chat turn | One of four prompts, by mode | Streamed markdown | 0 / **4096** | Static fallback sentence |
+| **4** | `services/chart_config.py` → `build` | Only when the result passed the chartability gate | Column names + first 30 rows + question | JSON `ChartConfig` | 0 / 2048 | Deterministic fallback chart |
 
 **Calls per turn:**
 
@@ -277,6 +277,12 @@ rendering data — is deterministic Python and SQL.
 Temperature is `0` on all four. Gemini 3 defaults to `1.0`, so it is passed
 explicitly — a router that picks a different tool for the same question on
 consecutive runs is not a router.
+
+The answer call gets a **4096-token budget** where the others take the 2048
+default. A sectioned answer over a multi-dimension result runs several hundred
+tokens, and on a thinking model the reasoning is drawn from the same budget, so
+2048 sits close enough to the ceiling to risk truncating an answer mid-section.
+It is a cap, not a reservation — short answers cost exactly what they did before.
 
 ### 4.2 Call 1 — Router (interpretation + tool selection)
 
@@ -337,10 +343,37 @@ The only streaming call. It selects one of **four** prompts:
 | `_DIRECT_PROMPT` | `mode=direct` | Question, router's `reason`, data window |
 | `_ERROR_PROMPT` | SQL failed, or forecast failed | Question, the error, data window |
 
-**Output:** streamed prose, emitted as `output` SSE events buffered to ~30
-characters. Light markdown is permitted (**bold** for figures, backticks for
-codes); headings and tables are forbidden because the rows are already displayed
-beside the answer.
+**Output:** streamed markdown, emitted as `output` SSE events buffered to ~30
+characters.
+
+**Answer depth follows the shape of the result, not a fixed budget.** The SQL
+prompt states three tiers explicitly, because a model given room to write and no
+rule about when to use it will pad a one-number answer into a report:
+
+| Result shape | Format |
+|---|---|
+| A single value, or one row | Two or three sentences, figure in **bold**. No headings, no bullets — a section header over one number imposes a shape the data does not have |
+| One dimension (one grouping column, one measure) | **Bold title line** naming what is shown and the period, a sentence of introduction, then 2–4 bullets each leading with its **bold** figure |
+| Two or more dimensions or measures | Same opening, then one `### Section` per dimension or measure, each with a sentence and 2–3 bullets |
+
+The counterpart to that freedom is the instruction to **characterise rather than
+recite** — the highest and lowest, the gap, the range, where a trend turns,
+which group is the outlier. The full table is already rendered beside the
+answer, so prose walking the rows one at a time is the same data twice, and the
+longer an answer is allowed to be the more inviting that failure becomes.
+
+**Markdown contract for the frontend.** The answer is markdown, and the prompts
+constrain it to a narrow subset the client must render:
+
+- `###` is the **only** heading level permitted — never `#` or `##`
+- **Bold**, bullet lists, and `backticks` for identifiers
+- **No tables** — the result table is a separate panel
+- No citation markers of any kind
+
+Tone is specified too: a helpful analyst talking to a colleague, closing on what
+a pattern might reflect when the data supports one, and skipping the empty parts
+of politeness — no "great question", no "I hope this helps", no offers of
+further assistance.
 
 `history` and `chart` are stripped from the forecast payload deliberately —
 twelve months of data in the prompt costs tokens and invites the model to
@@ -587,9 +620,20 @@ estimated, so the envelope opens from a point rather than a step.
 `orders_per_month`, `months_of_history`, `method_label`, `notes`, the history
 and forecast rows, a prose `explanation`, and the chart.
 
-The answer prompt requires the total be stated **as a range**, not a point —
-the interval is the honest part of this forecast, and an answer quoting only the
-midpoint throws it away.
+The answer prompt gives this route a **fixed three-section structure**, since a
+forecast always has the same parts to report:
+
+| Section | Contents |
+|---|---|
+| *(opening)* | Bold title line, a sentence of introduction, then **the notes** — before any number |
+| `### Projection` | Monthly figures and the horizon total **as a range**, never a point |
+| `### Inventory Recommendation` | The recommended quantity, and in one clause how safety stock was derived |
+| `### Method and Confidence` | The method in plain language, what twelve months supports, and — if the projection is flat — why that is a decision rather than a failure |
+
+The range requirement is the important one: the interval is the honest part of
+this forecast, and an answer quoting only the midpoint throws it away. The
+prompt also forbids the model computing its own interval, total or
+recommendation — every figure must come from the payload.
 
 ---
 
@@ -683,9 +727,13 @@ statement timeout.
   the client is responsible for.
 - **No caching.** Every question is a fresh model call and a fresh query.
 - **No automated tests.** Verification was manual against the running service.
-- **Cold starts.** `min-instances` defaults to `1` in `deploy.sh` precisely
-  because at `0` the first request waits on a container start plus the LangGraph
-  and Vertex client imports, which reads as a broken application.
+- **Cold starts.** The service currently runs at `min-instances=0` so an idle
+  deployment costs nothing. The first request after an idle period therefore
+  waits on a container start plus the LangGraph and Vertex client imports —
+  perhaps 10–25 seconds, which reads as a broken application rather than a slow
+  one. `--cpu-boost` shortens it but does not remove it. Setting
+  `MIN_INSTANCES=1` eliminates it, and that is the intended configuration for
+  review; `/api/health` is also a cheap warm-up target.
 - **Data residency.** `gemini-3.7-flash` is served only from the `global`
   endpoint, which carries no residency guarantee. For a real client with EU
   orders this would need revisiting; Gemini 3.5 Flash is the newest model
@@ -703,6 +751,22 @@ Reads `.env`, builds through Cloud Build into Artifact Registry, and deploys to
 Cloud Run with the Cloud SQL instance attached and the runtime service account
 bound. One-time API enablement and IAM bindings are included as commented
 commands at the top of the script.
+
+### Runtime configuration
+
+| Setting | Value | Why |
+|---|---|---|
+| `--memory` | `512Mi` | The dataset is 400 rows and results are capped at 500, so nothing large is ever held in memory. The floor is the Python process plus the LangGraph and Vertex imports, which fits comfortably. Halved from 1Gi after observing actual usage |
+| `--cpu` | `1` | The workload is I/O bound — database round trips and Vertex calls |
+| `--cpu-boost` | on | Extra CPU during container start, which is where the only real latency is |
+| `--min-instances` | `0` *(currently)* | No cost while idle. **Set to `1` for review** — see the cold-start note in [limitations](#9-limitations-and-unsupported-queries) |
+| `--max-instances` | `10` | |
+| `--timeout` | `300` | An SSE connection stays open for the whole turn |
+| `--allow-unauthenticated` | on | There is no auth layer; the frontend is a separate public service |
+
+One worker per container (`--workers 1` in the Dockerfile): the workload is I/O
+bound, and a second worker would double the connection pool against the smallest
+Cloud SQL tier for no throughput.
 
 The deployed service uses the **attached service account** for both Cloud SQL
 and Vertex AI — `GOOGLE_APPLICATION_CREDENTIALS` is not set in the container and
