@@ -154,7 +154,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --service-account "$SERVICE_ACCOUNT" \
   --port 8080 \
   --allow-unauthenticated \
-  --memory 1Gi \
+  --memory 512Mi \
   --cpu 1 \
   --cpu-boost \
   --timeout 300 \
